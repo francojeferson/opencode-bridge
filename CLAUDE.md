@@ -18,6 +18,8 @@ node opencode.mjs --tier fast "quick question"       # fastest/cheapest + fallba
 node opencode.mjs --model provider/model-id "prompt" # explicit, NO fallback
 node opencode.mjs --session ses_xxx "follow-up"      # resume a session
 node opencode.mjs --no-tools "text-only query"       # disable tool use
+node opencode.mjs --timeout 30000 "prompt"           # per-attempt ms before a hung model is aborted (default 60000)
+node opencode.mjs --tier high --debug-chain          # print resolved chain, no model calls
 ```
 
 Output: `{ sessionID, reply, model, cost, tokens, fallbacks? }`. Capture `sessionID`
@@ -29,12 +31,26 @@ from turn 1, pass as `--session` to continue.
 
 ### Fallback Behavior
 
-On empty reply, script automatically tries the next model in the chain:
-- `--model`: no fallback — explicit choice, use as-is
-- `--tier`: falls through that tier's candidates in preference order
-- No flag: daemon default → high tier → mid tier → fast tier
+On empty reply OR a thrown error (network/fetch failure, SDK error, timeout), the script
+tries the next model in the chain — one bad model never aborts the run:
+- **Hung models are aborted.** Some provider models never respond; each attempt carries an
+  `AbortSignal.timeout(--timeout)` (default 60s) so a hang is aborted and the chain moves on
+  instead of blocking forever. A timeout is NOT retried (the model is hung) — it just falls
+  through to the next model.
+- **Transient throws ARE retried** with a brief backoff (the daemon occasionally throws a
+  one-off `fetch failed` while up): `--model` retries up to 3× before erroring; chain models
+  2× each.
+- Chains: `--tier` falls through that tier's candidates then a cross-provider metadata tail;
+  no-flag goes daemon default → high → mid → fast → metadata tail.
 
-Output includes `fallbacks` array (models that returned empty) when fallback occurred.
+A provider-wide failure (402 insufficient credits, 401/403 auth) marks the whole provider
+dead and skips its remaining models. Output includes `fallbacks` (models that failed),
+`skipped` (skipped because their provider was dead), and `lastError` on total failure.
+
+**Exit:** the script sets `process.exitCode` and lets the event loop drain — it never calls
+`process.exit()`. Calling `process.exit()` mid-request aborts libuv on Windows/Node
+(`Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)`); draining exits cleanly with the
+right code, and aborted sockets close promptly so there's no hang.
 
 ### Tiers
 
@@ -47,6 +63,22 @@ Output includes `fallbacks` array (models that returned empty) when fallback occ
 
 Tiers resolve dynamically from available models — different environments get
 different picks based on what's configured.
+
+**Tier semantics: quality-first, provider- and environment-agnostic.**
+Each `TIER_RANKS` entry is a capability *rung* (regex) matched across ALL providers, in
+best-first order. Within a rung, `betterFirst()` sorts **quality-first** by a metadata
+`powerScore` (context + reasoning + toolcall + output room; price a mild nudge); cost
+breaks only exact ties, so a higher-quality PAID model is never demoted for costing more.
+Models are pre-filtered by `isTextModel` (active, text-in/text-out, NOT a media generator
+— drops `gemini-*-image`-style models that return empty text despite `output.text:true`).
+
+The regexes are a **quality prior, not a requirement**: `appendSafetyNet` appends EVERY
+remaining usable model ranked by `powerScore`, with no hardcoded provider name. So an
+environment whose catalog matches none of the priors (Ollama, Bedrock, a different
+opencode config) still resolves to a non-empty, quality-ordered chain — the metadata
+ranking simply becomes the whole chain. Verify with `--debug-chain` (its length equals the
+count of usable text models in the environment). All signals come from `/config/providers`
+metadata (`cost`, `limit.{context,output}`, `capabilities`, `status`).
 
 ### Model Discovery
 
