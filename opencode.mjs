@@ -23,7 +23,7 @@ const opt = (flag, def) => {
   return argv[i + 1]?.startsWith("--") || i + 1 >= argv.length ? true : argv[i + 1]
 }
 const baseUrl = opt("--server", "http://127.0.0.1:4096")
-const modelStr = opt("--model", "openrouter/google/gemma-4-31b-it:free")
+const modelStr = opt("--model", null)
 const session = opt("--session", null)
 const agent = opt("--agent", "build")
 const noTools = argv.includes("--no-tools")
@@ -36,8 +36,9 @@ if (!text) {
 }
 
 // model string "providerID/modelID..." -> first segment is provider, rest is model id
-const slash = modelStr.indexOf("/")
-const model = { providerID: modelStr.slice(0, slash), modelID: modelStr.slice(slash + 1) }
+const model = modelStr
+  ? (() => { const slash = modelStr.indexOf("/"); return { providerID: modelStr.slice(0, slash), modelID: modelStr.slice(slash + 1) } })()
+  : undefined
 
 const client = createOpencodeClient({ baseUrl })
 const unwrap = (r) => r?.data ?? r
@@ -46,14 +47,15 @@ try {
   // resume existing session or create new
   let id = session
   if (!id) {
-    const created = unwrap(
-      await client.session.create({ body: { agent, model: { providerID: model.providerID, id: model.modelID } } }),
-    )
+    const createBody = { agent }
+    if (model) createBody.model = { providerID: model.providerID, id: model.modelID }
+    const created = unwrap(await client.session.create({ body: createBody }))
     id = created.id
   }
 
   // prompt_async drives the turn and returns the assistant message
-  const body = { agent, model, parts: [{ type: "text", text }] }
+  const body = { agent, parts: [{ type: "text", text }] }
+  if (model) body.model = model
   if (noTools) body.tools = { bash: false, edit: false, write: false, read: false, glob: false, grep: false }
   const res = unwrap(await client.session.prompt({ path: { id }, body }))
 
