@@ -1,20 +1,27 @@
 #!/usr/bin/env node
-// opencode.mjs — structured bridge: Claude Code <-> running opencode daemon
+// opencode.mjs — drive a running opencode daemon from Claude Code.
 //
 // Prereq (persistent daemon):   opencode serve --port 4096
 //
 // Usage:
 //   node opencode.mjs "refactor auth.ts to async"
-//   node opencode.mjs --session ses_abc "now add tests"          # resume
-//   node opencode.mjs --model openrouter/google/gemma-4-31b-it:free "hi"
-//   node opencode.mjs --no-tools "just answer, run no tools"      # text-only
+//   node opencode.mjs --session ses_abc "now add tests"       # resume
+//   node opencode.mjs --model openrouter/openai/gpt-5 "hi"    # override model
+//   node opencode.mjs --no-tools "just answer, run no tools"  # text-only
 //
-// Emits ONE JSON object to stdout: { sessionID, reply, cost, tokens, messages }
-// Why SDK over raw curl: SDK hits /session/{id}/prompt_async which DRIVES the
-// turn and returns the assistant message. Raw /api/session/{id}/prompt only
-// admits a queued message and never executes.
+// Emits ONE JSON object to stdout: { sessionID, reply, cost, tokens }
+//
+// Why SDK (not raw curl): the SDK hits /session/{id}/prompt_async, which DRIVES
+// the turn and returns the assistant message. Raw /api/session/{id}/prompt only
+// admits a queued message and never executes it.
+//
+// Default model: opencode/big-pickle. The daemon's own default provider
+// (cloudflare-workers-ai) returns EMPTY replies (0 output tokens) despite
+// incurring cost, so we pin a provider that actually responds. Override freely.
 
 import { createOpencodeClient } from "@opencode-ai/sdk"
+
+const DEFAULT_MODEL = "opencode/big-pickle"
 
 const argv = process.argv.slice(2)
 const opt = (flag, def) => {
@@ -23,7 +30,7 @@ const opt = (flag, def) => {
   return argv[i + 1]?.startsWith("--") || i + 1 >= argv.length ? true : argv[i + 1]
 }
 const baseUrl = opt("--server", "http://127.0.0.1:4096")
-const modelStr = opt("--model", null)
+const modelStr = opt("--model", DEFAULT_MODEL)
 const session = opt("--session", null)
 const agent = opt("--agent", "build")
 const noTools = argv.includes("--no-tools")
@@ -31,38 +38,36 @@ const text = argv.filter((a, i) => !a.startsWith("--") && !argv[i - 1]?.startsWi
   || argv.filter((a) => !a.startsWith("--")).at(-1)
 
 if (!text) {
-  console.error("usage: node opencode.mjs [--session id] [--model p/m] [--agent a] [--no-tools] \"prompt\"")
+  console.error('usage: node opencode.mjs [--session id] [--model p/m] [--agent a] [--no-tools] "prompt"')
   process.exit(2)
 }
 
-// model string "providerID/modelID..." -> first segment is provider, rest is model id
-const model = modelStr
-  ? (() => { const slash = modelStr.indexOf("/"); return { providerID: modelStr.slice(0, slash), modelID: modelStr.slice(slash + 1) } })()
-  : undefined
+// "providerID/modelID..." -> first segment is provider, rest is model id
+const slash = modelStr.indexOf("/")
+const model = { providerID: modelStr.slice(0, slash), modelID: modelStr.slice(slash + 1) }
 
 const client = createOpencodeClient({ baseUrl })
 const unwrap = (r) => r?.data ?? r
 
 try {
-  // resume existing session or create new
+  // resume existing session or create new (session create wants model.id)
   let id = session
   if (!id) {
-    const createBody = { agent }
-    if (model) createBody.model = { providerID: model.providerID, id: model.modelID }
-    const created = unwrap(await client.session.create({ body: createBody }))
+    const created = unwrap(await client.session.create({
+      body: { agent, model: { providerID: model.providerID, id: model.modelID } },
+    }))
     id = created.id
   }
 
   // prompt_async drives the turn and returns the assistant message
-  const body = { agent, parts: [{ type: "text", text }] }
-  if (model) body.model = model
+  const body = { agent, model, parts: [{ type: "text", text }] }
   if (noTools) body.tools = { bash: false, edit: false, write: false, read: false, glob: false, grep: false }
   const res = unwrap(await client.session.prompt({ path: { id }, body }))
 
   const parts = res.parts ?? []
   let reply = parts.filter((p) => p.type === "text").map((p) => p.text).join("").trim()
 
-  // fallback: pull last assistant message if prompt return lacked text
+  // fallback: pull last assistant message if the prompt return lacked text
   if (!reply) {
     const msgs = unwrap(await client.session.messages({ path: { id } }))
     const last = [...msgs].reverse().find((m) => m.info?.role === "assistant")

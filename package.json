@@ -1,13 +1,8 @@
 {
   "name": "opencode-bridge",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
+  "description": "SDK bridge to drive a local opencode daemon",
+  "main": "opencode.mjs",
   "license": "ISC",
   "type": "module",
   "dependencies": {
