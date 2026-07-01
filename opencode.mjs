@@ -396,7 +396,7 @@ async function main() {
       if (deadProviders.has(model.providerID)) { skipped.push(modelFull); continue }
       let id, reply, info, error
       try {
-        ({ id, reply, info, error } = await attemptPrompt(model, null, 2))
+        ({ id, reply, info, error } = await attemptPrompt(model, session, 2))
       } catch (e) {
         // A THROWN error (network/fetch failure, SDK error, timeout) that survives retries
         // must not abort the whole chain — treat it like a failed model and fall through.
