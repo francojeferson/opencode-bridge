@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "SDK bridge to drive a local opencode daemon",
   "main": "opencode.mjs",
-  "license": "ISC",
+  "license": "MIT",
   "type": "module",
   "dependencies": {
     "@opencode-ai/sdk": "^1.17.11"

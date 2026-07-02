@@ -10,8 +10,8 @@ SDK bridge to drive a local [opencode](https://opencode.ai) daemon from Claude C
 ## Installation
 
 ```bash
-git clone <this-repo> ~/repos/opencode-bridge
-cd ~/repos/opencode-bridge
+git clone https://github.com/francojeferson/opencode-bridge.git
+cd opencode-bridge
 npm install
 ```
 
@@ -51,7 +51,7 @@ Expected output:
 {
   "sessionID": "ses_...",
   "reply": "I'm ...",
-  "model": "cai/gpt-5.4-nano",
+  "model": "provider/model-id",
   "cost": 0,
   "tokens": { "input": 0, "output": 0, "reasoning": 0 }
 }
@@ -115,13 +115,6 @@ mkdir -p ~/.claude/skills/opencode
 cp .claude/skills/opencode/SKILL.md ~/.claude/skills/opencode/SKILL.md
 ```
 
-On Windows (Git Bash):
-
-```bash
-mkdir -p ~/. claude/skills/opencode
-cp .claude/skills/opencode/SKILL.md ~/.claude/skills/opencode/SKILL.md
-```
-
 On Windows (PowerShell):
 
 ```powershell
@@ -156,3 +149,7 @@ When triggered, Claude Code will:
 | `"All models returned empty"` | No model responded; check provider auth/credits |
 | `402 Insufficient credits` | Provider out of credits; other providers in the fallback chain will be tried automatically |
 | Empty reply from `--model` | Model ID may be wrong; run `--list-models` to check |
+
+## License
+
+[MIT](LICENSE) — free to use, modify, and distribute.
