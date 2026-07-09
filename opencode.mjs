@@ -70,7 +70,7 @@ const argv = process.argv.slice(2)
 // followed by another flag used to become Number(true)=1 — a 1ms abort budget — and
 // "--tier high" with no prompt used to send "high" AS the prompt).
 const VALUE_FLAGS = new Set(["--server", "--model", "--tier", "--session", "--agent", "--timeout"])
-const BOOL_FLAGS = new Set(["--no-tools", "--list-models", "--debug-chain"])
+const BOOL_FLAGS = new Set(["--no-tools", "--list-models", "--debug-chain", "--help"])
 const flags = {}
 const positional = []
 let argError = null
@@ -289,7 +289,7 @@ async function runDebugChain() {
   }
 }
 
-const USAGE = 'usage: node opencode.mjs [--model p/m] [--tier high|code|mid|fast] [--session id] [--agent a] [--no-tools] [--timeout ms] [--list-models] [--debug-chain] "prompt" (or "-" to read the prompt from stdin)'
+const USAGE = 'usage: node opencode.mjs [--server url] [--model p/m] [--tier high|code|mid|fast] [--session id] [--agent a] [--no-tools] [--timeout ms] [--list-models] [--debug-chain] [--help] "prompt" (or "-" to read the prompt from stdin)'
 
 // Prompt = all non-flag tokens. A lone "-" reads the prompt from stdin instead —
 // Windows command lines cap near 8K chars, so piping is the only way to hand over a
@@ -345,6 +345,33 @@ async function sendPrompt(model, sessionId) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+// A RESUMED session can't be thrown away like a fresh one: a failed attempt leaves its
+// user message (and any partial turn) behind, so the next chain model would see a
+// duplicate unanswered question. Best-effort undo: abort anything still running server-
+// side (a client-side timeout doesn't stop the turn), then revert the session to the
+// message that was its tip before the attempt. Failures here are swallowed — hygiene
+// must never mask the real outcome.
+async function revertToTip(sessionId, tipId) {
+  if (!tipId) return
+  try {
+    await client.session.abort({ path: { id: sessionId }, signal: AbortSignal.timeout(5000) }).catch(() => {})
+    const msgs = unwrap(await client.session.messages({ path: { id: sessionId }, signal: AbortSignal.timeout(5000) }))
+    const idx = msgs.findIndex((m) => m.info?.id === tipId)
+    const firstNew = idx >= 0 ? msgs[idx + 1]?.info?.id : null
+    if (firstNew) await client.session.revert({ path: { id: sessionId }, body: { messageID: firstNew }, signal: AbortSignal.timeout(5000) })
+  } catch { /* best-effort */ }
+}
+
+// Tip of a resumed session before any attempt runs; null for fresh sessions (they are
+// deleted outright on failure) or when the lookup fails (revert becomes a no-op).
+async function resumeTip(sessionId) {
+  if (!sessionId) return null
+  try {
+    const msgs = unwrap(await client.session.messages({ path: { id: sessionId }, signal: AbortSignal.timeout(callTimeout) }))
+    return msgs.at(-1)?.info?.id ?? null
+  } catch { return null }
+}
 
 // Retry ONLY transient thrown errors (network/fetch blips, SDK errors) with a brief
 // backoff. Does NOT retry a 402/empty reply (deterministic — the fallback chain handles
@@ -413,14 +440,17 @@ async function main() {
         process.exitCode = 2; return
       }
 
+      const tip = await resumeTip(session)
       let id, reply, info, error
       try {
         ({ id, reply, info, error } = await attemptPrompt(model, session, 3))
       } catch (e) {
+        await revertToTip(session, tip)
         console.log(JSON.stringify({ error: e.message ?? String(e), model: modelStr }, null, 2))
         process.exitCode = 1; return
       }
       if (!reply && error) {
+        await revertToTip(session, tip)
         console.log(JSON.stringify({ error: error.data?.message ?? error.name ?? "empty reply", model: modelStr, statusCode: error.data?.statusCode }, null, 2))
         process.exitCode = 1; return
       }
@@ -440,6 +470,7 @@ async function main() {
     const skipped = []
     const deadProviders = new Set()
     let lastError = null
+    const tip = await resumeTip(session)
     for (const model of chain) {
       const modelFull = `${model.providerID}/${model.modelID}`
       if (deadProviders.has(model.providerID)) { skipped.push(modelFull); continue }
@@ -449,6 +480,7 @@ async function main() {
       } catch (e) {
         // A THROWN error (network/fetch failure, SDK error, timeout) that survives retries
         // must not abort the whole chain — treat it like a failed model and fall through.
+        await revertToTip(session, tip)
         lastError = { model: modelFull, message: e.message ?? String(e) }
         tried.push(modelFull)
         continue
@@ -470,6 +502,7 @@ async function main() {
         lastError = { model: modelFull, statusCode: error.data?.statusCode, message: error.data?.message ?? error.name }
         if (isProviderDead(error)) deadProviders.add(model.providerID)
       }
+      await revertToTip(session, tip)
       tried.push(modelFull)
     }
 
@@ -493,6 +526,8 @@ async function main() {
 if (argError) {
   console.log(JSON.stringify({ error: argError, usage: USAGE }))
   process.exitCode = 2
+} else if (flags["--help"]) {
+  console.log(USAGE)
 } else if (listModels) {
   await runListModels()
 } else if (debugChain) {

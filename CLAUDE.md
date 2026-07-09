@@ -49,7 +49,9 @@ dead and skips its remaining models. Output includes `fallbacks` (models that fa
 `skipped` (skipped because their provider was dead), and `lastError` on total failure.
 
 Failed attempts' throwaway sessions are deleted best-effort on exit — only the session
-that produced the reply survives. A `--session` id you pass in is never deleted.
+that produced the reply survives. A `--session` id you pass in is never deleted; instead,
+a failed attempt on a resumed session is reverted (abort + `session.revert` to the
+pre-attempt tip) so duplicate user messages don't pile up before the next chain model.
 
 **Exit:** the script sets `process.exitCode` and lets the event loop drain — it never calls
 `process.exit()`. Calling `process.exit()` mid-request aborts libuv on Windows/Node

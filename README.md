@@ -53,7 +53,7 @@ Expected output:
   "reply": "I'm ...",
   "model": "provider/model-id",
   "cost": 0,
-  "tokens": { "input": 0, "output": 0, "reasoning": 0 }
+  "tokens": { "total": 0, "input": 0, "output": 0, "reasoning": 0, "cache": { "write": 0, "read": 0 } }
 }
 ```
 
@@ -70,6 +70,7 @@ kill $(pgrep -f "opencode serve")  # Linux/macOS
 
 ```bash
 node opencode.mjs [flags] "your prompt"
+cat prompt.txt | node opencode.mjs [flags] -   # prompt "-" reads stdin (long prompts / embedded files)
 ```
 
 ### Flags
@@ -79,10 +80,15 @@ node opencode.mjs [flags] "your prompt"
 | `--tier high\|code\|mid\|fast` | Pick best model in tier with automatic fallback |
 | `--model provider/model-id` | Exact model, no fallback |
 | `--session ses_xxx` | Continue an existing session |
+| `--agent name` | opencode agent to run prompts as (default: `build`) |
+| `--server url` | Daemon base URL (default: `http://127.0.0.1:4096`) |
 | `--no-tools` | Disable tool use (text-only) |
 | `--timeout ms` | Per-attempt timeout in ms (default: 60000) |
 | `--list-models` | Show available models and tiers |
 | `--debug-chain` | Print resolved fallback chain without calling any model |
+| `--help` | Print usage |
+
+Unknown flags and value flags missing their value error out (exit code 2).
 
 ### Tiers
 
@@ -148,7 +154,7 @@ When triggered, Claude Code will:
 | `fetch failed` | Daemon not running; start with `opencode serve --port 4096` |
 | `"All models returned empty"` | No model responded; check provider auth/credits |
 | `402 Insufficient credits` | Provider out of credits; other providers in the fallback chain will be tried automatically |
-| Empty reply from `--model` | Model ID may be wrong; run `--list-models` to check |
+| `Unknown model "..."` from `--model` | Model ID not in this environment's catalog; the error suggests near matches (`didYouMean`) |
 
 ## License
 
