@@ -4,6 +4,9 @@
   "description": "SDK bridge to drive a local opencode daemon",
   "main": "opencode.mjs",
   "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
   "type": "module",
   "dependencies": {
     "@opencode-ai/sdk": "^1.17.11"

@@ -37,11 +37,15 @@ If the daemon is already running (port 4096 responds), skip starting a new one. 
 
 ## Sending Prompts
 
-Run from `C:\Users\jfranco\repos\opencode-bridge`:
+Run from the opencode-bridge repo root:
 
 ```bash
 node opencode.mjs [flags] "prompt text"
+node opencode.mjs [flags] -              # prompt "-" reads stdin (long prompts)
 ```
+
+Use the stdin form whenever the prompt embeds file contents — Windows command lines
+cap near 8K chars and quoting breaks on special chars.
 
 ### Flags
 
@@ -106,7 +110,7 @@ node opencode.mjs --tier fast "What's the time complexity of Dijkstra's with a f
 
 ### Code review delegation
 ```bash
-node opencode.mjs --tier code "Review this function for bugs: $(cat path/to/file.ts)"
+{ echo "Review this function for bugs:"; cat path/to/file.ts; } | node opencode.mjs --tier code -
 ```
 
 ### Multi-turn session

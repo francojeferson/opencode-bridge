@@ -10,6 +10,7 @@
 //   node opencode.mjs --tier high "complex architecture task" # pick best in tier
 //   node opencode.mjs --no-tools "just answer, run no tools"  # text-only
 //   node opencode.mjs --list-models                           # show available models + tiers
+//   type prompt.txt | node opencode.mjs --tier code -         # prompt "-" reads stdin (long prompts)
 //
 // Emits ONE JSON object to stdout: { sessionID, reply, model, cost, tokens, fallbacks }
 //
@@ -62,23 +63,47 @@ const TIER_RANKS = {
 }
 
 const argv = process.argv.slice(2)
-const opt = (flag, def) => {
-  const i = argv.indexOf(flag)
-  if (i === -1) return def
-  return argv[i + 1]?.startsWith("--") || i + 1 >= argv.length ? true : argv[i + 1]
+
+// Explicit flag tables: value flags consume the next token, boolean flags stand alone.
+// Anything else starting with "--" is a hard error (catches typos like --teir), and a
+// value flag with a missing value errors instead of silently misparsing (--timeout
+// followed by another flag used to become Number(true)=1 — a 1ms abort budget — and
+// "--tier high" with no prompt used to send "high" AS the prompt).
+const VALUE_FLAGS = new Set(["--server", "--model", "--tier", "--session", "--agent", "--timeout"])
+const BOOL_FLAGS = new Set(["--no-tools", "--list-models", "--debug-chain"])
+const flags = {}
+const positional = []
+let argError = null
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i]
+  if (VALUE_FLAGS.has(a)) {
+    const v = argv[i + 1]
+    if (v === undefined || v.startsWith("--")) { argError = `${a} requires a value`; break }
+    flags[a] = v; i++
+  } else if (BOOL_FLAGS.has(a)) {
+    flags[a] = true
+  } else if (a.startsWith("--")) {
+    argError = `unknown flag "${a}"`; break
+  } else {
+    positional.push(a)
+  }
 }
-const baseUrl = opt("--server", "http://127.0.0.1:4096")
-const modelStr = opt("--model", null)
-const tierStr = opt("--tier", null)
-const session = opt("--session", null)
-const agent = opt("--agent", "build")
-const noTools = argv.includes("--no-tools")
-const listModels = argv.includes("--list-models")
-const debugChain = argv.includes("--debug-chain")
-const callTimeout = Number(opt("--timeout", "60000")) || 60000  // per-attempt ms; abort a hung model
+
+const baseUrl = flags["--server"] ?? "http://127.0.0.1:4096"
+const modelStr = flags["--model"] ?? null
+const tierStr = flags["--tier"] ?? null
+const session = flags["--session"] ?? null
+const agent = flags["--agent"] ?? "build"
+const noTools = !!flags["--no-tools"]
+const listModels = !!flags["--list-models"]
+const debugChain = !!flags["--debug-chain"]
+const timeoutArg = Number(flags["--timeout"])
+const callTimeout = timeoutArg > 0 ? timeoutArg : 60000  // per-attempt ms; abort a hung model
 
 async function fetchProviderConfig() {
-  const res = await fetch(`${baseUrl}/config/providers`)
+  // Own abort budget: a hung (not down) daemon would otherwise stall this fetch forever.
+  const res = await fetch(`${baseUrl}/config/providers`, { signal: AbortSignal.timeout(10000) })
+  if (!res.ok) throw new Error(`GET /config/providers -> ${res.status} ${res.statusText}`)
   return res.json()
 }
 
@@ -233,47 +258,57 @@ function isProviderDead(error) {
   return /insufficient credits|unauthorized|forbidden/i.test(error?.data?.message ?? "")
 }
 
-if (listModels) {
+// Both diagnostic modes exit via process.exitCode + drain, same as main() — see the
+// comment above main() for why process.exit() is never called.
+async function runListModels() {
   try {
     const config = await fetchProviderConfig()
     const models = getAllModelIds(config)
     const defaults = config.default ?? {}
     const tiers = {}
-    for (const [tier] of Object.entries(TIER_RANKS)) {
+    for (const tier of Object.keys(TIER_RANKS)) {
       tiers[tier] = pickAllByTier(tier, models).map(m => ({ model: m.full, out: m.cost?.output ?? null, pw: +powerScore(m).toFixed(2) }))
     }
     console.log(JSON.stringify({ defaults, tiers, all: models.map(m => m.full) }, null, 2))
   } catch (e) {
     console.log(JSON.stringify({ error: e.message ?? String(e) }))
-    process.exit(1)
+    process.exitCode = 1
   }
-  process.exit(0)
 }
 
 // Print the resolved fallback chain (no model calls) for --tier / no-flag. Useful for
 // verifying ordering and confirming the chain resolves in a given environment.
-if (debugChain) {
+async function runDebugChain() {
   try {
     const config = await fetchProviderConfig()
     const chain = appendSafetyNet(tierStr ? buildTierFallbackChain(tierStr, config) : buildFallbackChain(config), config)
     console.log(JSON.stringify(chain.map(m => `${m.providerID}/${m.modelID}`), null, 2))
   } catch (e) {
     console.log(JSON.stringify({ error: e.message ?? String(e) }))
-    process.exit(1)
+    process.exitCode = 1
   }
-  process.exit(0)
 }
 
-const text = argv.filter((a, i) => !a.startsWith("--") && !argv[i - 1]?.startsWith("--")).join(" ")
-  || argv.filter((a) => !a.startsWith("--")).at(-1)
+const USAGE = 'usage: node opencode.mjs [--model p/m] [--tier high|code|mid|fast] [--session id] [--agent a] [--no-tools] [--timeout ms] [--list-models] [--debug-chain] "prompt" (or "-" to read the prompt from stdin)'
 
-if (!text) {
-  console.error('usage: node opencode.mjs [--model p/m] [--tier high|code|mid|fast] [--session id] [--agent a] [--no-tools] [--timeout ms] [--list-models] [--debug-chain] "prompt"')
-  process.exit(2)
+// Prompt = all non-flag tokens. A lone "-" reads the prompt from stdin instead —
+// Windows command lines cap near 8K chars, so piping is the only way to hand over a
+// long prompt (e.g. a file to review) without hitting the cap or shell-quoting hazards.
+let text = null
+async function readStdin() {
+  process.stdin.setEncoding("utf8")
+  let buf = ""
+  for await (const chunk of process.stdin) buf += chunk
+  return buf
 }
 
 const client = createOpencodeClient({ baseUrl })
 const unwrap = (r) => r?.data ?? r
+
+// Sessions created by THIS run. Failed fallback attempts would otherwise pile up orphan
+// sessions in the daemon; main() deletes every created-but-unused one on the way out.
+// A caller-supplied --session id is never added here, so it is never deleted.
+const createdSessions = new Set()
 
 async function sendPrompt(model, sessionId) {
   // Per-attempt timeout budget. The SDK honors `signal`, so a hung upstream (some provider
@@ -282,24 +317,28 @@ async function sendPrompt(model, sessionId) {
   const signal = AbortSignal.timeout(callTimeout)
   let id = sessionId
   if (!id) {
-    const created = unwrap(await client.session.create({
-      body: { agent, model: { providerID: model.providerID, id: model.modelID } },
-      signal,
-    }))
+    // Create body takes only {parentID, title} — agent/model bind per-prompt below.
+    const created = unwrap(await client.session.create({ signal }))
     id = created.id
+    createdSessions.add(id)
   }
 
   const body = { agent, model, parts: [{ type: "text", text }] }
-  if (noTools) body.tools = { bash: false, edit: false, write: false, read: false, glob: false, grep: false }
+  // Disable every built-in tool; "*" additionally covers the rest where the daemon
+  // supports wildcard keys (unknown keys are ignored, so it is safe either way).
+  if (noTools) body.tools = { "*": false, bash: false, edit: false, write: false, read: false, glob: false, grep: false, list: false, patch: false, todowrite: false, todoread: false, webfetch: false, task: false }
   const res = unwrap(await client.session.prompt({ path: { id }, body, signal }))
 
   const parts = res.parts ?? []
   let reply = parts.filter((p) => p.type === "text").map((p) => p.text).join("").trim()
 
   if (!reply) {
+    // Recover parts by THIS turn's assistant message id. Taking the last assistant
+    // message instead would resurface a PREVIOUS turn's reply on a resumed session,
+    // faking a success for a model that answered nothing.
     const msgs = unwrap(await client.session.messages({ path: { id }, signal }))
-    const last = [...msgs].reverse().find((m) => m.info?.role === "assistant")
-    reply = (last?.parts ?? []).filter((p) => p.type === "text").map((p) => p.text).join("").trim()
+    const mine = msgs.find((m) => m.info?.id && m.info.id === res.info?.id)
+    reply = (mine?.parts ?? []).filter((p) => p.type === "text").map((p) => p.text).join("").trim()
   }
 
   return { id, reply, info: res.info ?? {}, error: res.info?.error ?? null }
@@ -333,7 +372,16 @@ async function attemptPrompt(model, sessionId, attempts = 2) {
 // ("Assertion failed: !(handle->flags & UV_HANDLE_CLOSING) ... win/async.c"). Draining the
 // loop exits cleanly with the right code (localhost sockets close promptly — no hang).
 async function main() {
+  let keepId = null
   try {
+    text = positional.join(" ")
+    if (text === "-") text = (await readStdin()).trim()
+    if (!text) {
+      console.error(USAGE)
+      process.exitCode = 2
+      return
+    }
+
     // Explicit --model: no fallback, but retry transient throws (no other model to fall to).
     if (modelStr) {
       const slash = modelStr.indexOf("/")
@@ -376,6 +424,7 @@ async function main() {
         console.log(JSON.stringify({ error: error.data?.message ?? error.name ?? "empty reply", model: modelStr, statusCode: error.data?.statusCode }, null, 2))
         process.exitCode = 1; return
       }
+      keepId = id
       console.log(JSON.stringify({ sessionID: id, reply, model: modelStr, cost: info.cost, tokens: info.tokens }, null, 2))
       return
     }
@@ -405,6 +454,7 @@ async function main() {
         continue
       }
       if (reply) {
+        keepId = id
         console.log(JSON.stringify({
           sessionID: id,
           reply,
@@ -429,7 +479,24 @@ async function main() {
   } catch (e) {
     console.log(JSON.stringify({ error: e.message ?? String(e) }))
     process.exitCode = 1
+  } finally {
+    // Best-effort orphan cleanup: delete every session this run created except the one
+    // that produced the returned reply. Failures here never mask the real outcome.
+    createdSessions.delete(keepId)
+    if (createdSessions.size) {
+      await Promise.allSettled([...createdSessions].map((sid) =>
+        client.session.delete({ path: { id: sid }, signal: AbortSignal.timeout(5000) })))
+    }
   }
 }
 
-await main()
+if (argError) {
+  console.log(JSON.stringify({ error: argError, usage: USAGE }))
+  process.exitCode = 2
+} else if (listModels) {
+  await runListModels()
+} else if (debugChain) {
+  await runDebugChain()
+} else {
+  await main()
+}

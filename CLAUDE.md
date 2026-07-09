@@ -20,6 +20,7 @@ node opencode.mjs --session ses_xxx "follow-up"      # resume a session
 node opencode.mjs --no-tools "text-only query"       # disable tool use
 node opencode.mjs --timeout 30000 "prompt"           # per-attempt ms before a hung model is aborted (default 60000)
 node opencode.mjs --tier high --debug-chain          # print resolved chain, no model calls
+cat prompt.txt | node opencode.mjs --tier code -     # prompt "-" reads stdin (long prompts / embedded files)
 ```
 
 Output: `{ sessionID, reply, model, cost, tokens, fallbacks? }`. Capture `sessionID`
@@ -46,6 +47,9 @@ tries the next model in the chain — one bad model never aborts the run:
 A provider-wide failure (402 insufficient credits, 401/403 auth) marks the whole provider
 dead and skips its remaining models. Output includes `fallbacks` (models that failed),
 `skipped` (skipped because their provider was dead), and `lastError` on total failure.
+
+Failed attempts' throwaway sessions are deleted best-effort on exit — only the session
+that produced the reply survives. A `--session` id you pass in is never deleted.
 
 **Exit:** the script sets `process.exitCode` and lets the event loop drain — it never calls
 `process.exit()`. Calling `process.exit()` mid-request aborts libuv on Windows/Node
