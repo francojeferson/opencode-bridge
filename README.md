@@ -19,6 +19,7 @@ Verify:
 
 ```bash
 node opencode.mjs --help
+npm test              # smoke tests, no daemon required
 ```
 
 ## First Run

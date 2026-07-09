@@ -305,6 +305,12 @@ async function readStdin() {
 const client = createOpencodeClient({ baseUrl })
 const unwrap = (r) => r?.data ?? r
 
+// The model's actual reply text: skip parts the daemon marks synthetic (injected, not
+// model output) or ignored, so the caller never sees scaffolding text as the answer.
+const textOf = (parts) => (parts ?? [])
+  .filter((p) => p.type === "text" && !p.synthetic && !p.ignored)
+  .map((p) => p.text).join("").trim()
+
 // Sessions created by THIS run. Failed fallback attempts would otherwise pile up orphan
 // sessions in the daemon; main() deletes every created-but-unused one on the way out.
 // A caller-supplied --session id is never added here, so it is never deleted.
@@ -329,8 +335,7 @@ async function sendPrompt(model, sessionId) {
   if (noTools) body.tools = { "*": false, bash: false, edit: false, write: false, read: false, glob: false, grep: false, list: false, patch: false, todowrite: false, todoread: false, webfetch: false, task: false }
   const res = unwrap(await client.session.prompt({ path: { id }, body, signal }))
 
-  const parts = res.parts ?? []
-  let reply = parts.filter((p) => p.type === "text").map((p) => p.text).join("").trim()
+  let reply = textOf(res.parts)
 
   if (!reply) {
     // Recover parts by THIS turn's assistant message id. Taking the last assistant
@@ -338,7 +343,7 @@ async function sendPrompt(model, sessionId) {
     // faking a success for a model that answered nothing.
     const msgs = unwrap(await client.session.messages({ path: { id }, signal }))
     const mine = msgs.find((m) => m.info?.id && m.info.id === res.info?.id)
-    reply = (mine?.parts ?? []).filter((p) => p.type === "text").map((p) => p.text).join("").trim()
+    reply = textOf(mine?.parts)
   }
 
   return { id, reply, info: res.info ?? {}, error: res.info?.error ?? null }
@@ -380,7 +385,7 @@ async function resumeTip(sessionId) {
 function isTimeout(e) {
   return e?.name === "TimeoutError" || e?.name === "AbortError" || /abort|timed?\s*out/i.test(e?.message ?? "")
 }
-async function attemptPrompt(model, sessionId, attempts = 2) {
+async function attemptPrompt(model, sessionId, attempts = 2, tip = null) {
   let lastErr
   for (let i = 0; i < attempts; i++) {
     try {
@@ -388,7 +393,13 @@ async function attemptPrompt(model, sessionId, attempts = 2) {
     } catch (e) {
       lastErr = e
       if (isTimeout(e)) break
-      if (i < attempts - 1) await sleep(300 * (i + 1))
+      if (i < attempts - 1) {
+        // The throw may have landed AFTER the user message reached a resumed session —
+        // undo before re-sending, or the retry stacks a duplicate question. No-op for
+        // fresh sessions (tip is null; their throwaways are deleted on exit instead).
+        await revertToTip(sessionId, tip)
+        await sleep(300 * (i + 1))
+      }
     }
   }
   throw lastErr
@@ -443,7 +454,7 @@ async function main() {
       const tip = await resumeTip(session)
       let id, reply, info, error
       try {
-        ({ id, reply, info, error } = await attemptPrompt(model, session, 3))
+        ({ id, reply, info, error } = await attemptPrompt(model, session, 3, tip))
       } catch (e) {
         await revertToTip(session, tip)
         console.log(JSON.stringify({ error: e.message ?? String(e), model: modelStr }, null, 2))
@@ -476,7 +487,7 @@ async function main() {
       if (deadProviders.has(model.providerID)) { skipped.push(modelFull); continue }
       let id, reply, info, error
       try {
-        ({ id, reply, info, error } = await attemptPrompt(model, session, 2))
+        ({ id, reply, info, error } = await attemptPrompt(model, session, 2, tip))
       } catch (e) {
         // A THROWN error (network/fetch failure, SDK error, timeout) that survives retries
         // must not abort the whole chain — treat it like a failed model and fall through.

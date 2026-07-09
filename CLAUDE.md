@@ -93,6 +93,12 @@ Run `--list-models` to see what's available. Output includes:
 - `tiers` — resolved picks per tier for this environment
 - `all` — every available model
 
+## Tests
+
+`npm test` — smoke tests for flag parsing, usage errors, early --model validation,
+stdin prompt, and dead-daemon error paths. No daemon required, ~2s. Run after any
+change to opencode.mjs.
+
 ## Critical Notes
 
 - **No hardcoded default.** Script fetches from `/config/providers` at startup.
